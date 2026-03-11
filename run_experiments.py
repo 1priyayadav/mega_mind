@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, roc_curve
+from sklearn.model_selection import cross_val_score, StratifiedKFold
 
 import xgboost as xgb
 import lightgbm as lgb
@@ -55,6 +56,8 @@ def evaluate_model(name, y_true, y_pred, y_prob):
     rec = recall_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred)
     auc = roc_auc_score(y_true, y_prob)
+    
+    # Store and print results
     results[name] = {'Accuracy': acc, 'Precision': prec, 'Recall': rec, 'F1-Score': f1, 'AUC': auc}
     print(f"\n[{name}] Results:")
     print(f"Accuracy : {acc:.4f}")
@@ -83,12 +86,19 @@ svm_model = SVC(kernel='rbf', probability=True, random_state=42)
 start_time = time.time()
 svm_model.fit(X_train, y_train)
 svm_time = time.time() - start_time
+start_inf = time.time()
 y_pred_svm = svm_model.predict(X_test)
+inf_time = time.time() - start_inf
 y_prob_svm = svm_model.predict_proba(X_test)[:, 1]
 fpr, tpr, _ = roc_curve(y_test, y_prob_svm)
 roc_auc = roc_auc_score(y_test, y_prob_svm)
 roc_data['SVM'] = (fpr, tpr, roc_auc)
 evaluate_model('SVM', y_test, y_pred_svm, y_prob_svm)
+print(f"Time Complexity -> Training Time: {svm_time:.4f}s | Inference Time (Test Set): {inf_time:.4f}s")
+print("Evaluating Cross-Validation for SVM...")
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+cv_scores = cross_val_score(svm_model, X_scaled, y_resampled, cv=cv, scoring='accuracy')
+print(f"5-Fold CV Accuracy: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
 
 # 4. Base Model 2: XGBoost
 print("\nTraining XGBoost...")
@@ -96,12 +106,18 @@ xgb_model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', ra
 start_time = time.time()
 xgb_model.fit(X_train, y_train)
 xgb_time = time.time() - start_time
+start_inf = time.time()
 y_pred_xgb = xgb_model.predict(X_test)
+inf_time = time.time() - start_inf
 y_prob_xgb = xgb_model.predict_proba(X_test)[:, 1]
 fpr, tpr, _ = roc_curve(y_test, y_prob_xgb)
 roc_auc = roc_auc_score(y_test, y_prob_xgb)
 roc_data['XGBoost'] = (fpr, tpr, roc_auc)
 evaluate_model('XGBoost', y_test, y_pred_xgb, y_prob_xgb)
+print(f"Time Complexity -> Training Time: {xgb_time:.4f}s | Inference Time (Test Set): {inf_time:.4f}s")
+print("Evaluating Cross-Validation for XGBoost...")
+cv_scores = cross_val_score(xgb_model, X_scaled, y_resampled, cv=cv, scoring='accuracy')
+print(f"5-Fold CV Accuracy: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
 
 # 5. Proposed Model: Hybrid 1D-CNN + LightGBM
 print("\nTraining Proposed Model: 1D-CNN feature extractor + LightGBM...")
@@ -172,13 +188,30 @@ lgb_model = lgb.LGBMClassifier(random_state=42)
 start_time = time.time()
 lgb_model.fit(X_train_cnn_np, y_train)
 lgb_time = time.time() - start_time
+start_inf = time.time()
 y_pred_lgbm = lgb_model.predict(X_test_cnn_np)
+inf_time = time.time() - start_inf
 y_prob_lgbm = lgb_model.predict_proba(X_test_cnn_np)[:, 1]
 
 fpr, tpr, _ = roc_curve(y_test, y_prob_lgbm)
 roc_auc = roc_auc_score(y_test, y_prob_lgbm)
 roc_data['1D-CNN-LightGBM'] = (fpr, tpr, roc_auc)
 evaluate_model('1D-CNN-LightGBM', y_test, y_pred_lgbm, y_prob_lgbm)
+print(f"Time Complexity -> LightGBM Training Time: {lgb_time:.4f}s | Inference Time: {inf_time:.4f}s")
+
+print("\n--- Unbalanced vs Balanced Test on Proposed Model ---")
+X_unb_scaled = scaler.fit_transform(X_imputed)
+X_unb_train, X_unb_test, y_unb_train, y_unb_test = train_test_split(X_unb_scaled, y, test_size=0.2, random_state=42)
+X_unb_train_tensor = torch.tensor(X_unb_train, dtype=torch.float32).unsqueeze(1)
+X_unb_test_tensor = torch.tensor(X_unb_test, dtype=torch.float32).unsqueeze(1)
+with torch.no_grad():
+    _, X_unb_train_cnn = cnn_model(X_unb_train_tensor)
+    _, X_unb_test_cnn = cnn_model(X_unb_test_tensor)
+
+lgb_unb = lgb.LGBMClassifier(random_state=42)
+lgb_unb.fit(X_unb_train_cnn.numpy(), y_unb_train)
+y_unb_pred = lgb_unb.predict(X_unb_test_cnn.numpy())
+print(f"Unbalanced Accuracy: {accuracy_score(y_unb_test, y_unb_pred):.4f} | Balanced Accuracy (SMOTE): {results['1D-CNN-LightGBM']['Accuracy']:.4f}")
 
 # 6. Performance Visualizations
 # Plot ROC Curves together
